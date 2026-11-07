@@ -1,0 +1,6 @@
+{
+  "name": "Elyzareth Player pro v1.0",
+  "description": "Android music player dedicated to playing Elyzareth songs, selecting versions, displaying artwork and lyrics, audio visualization, and recording MP4 video.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

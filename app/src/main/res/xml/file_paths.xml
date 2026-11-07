@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <external-files-path name="exported_videos" path="." />
+    <files-path name="internal_videos" path="." />
+    <cache-path name="cache_videos" path="." />
+</paths>
