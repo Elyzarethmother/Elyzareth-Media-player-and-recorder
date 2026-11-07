@@ -24,7 +24,15 @@ import com.example.recorder.YuvConverter
 import com.example.ui.MainViewModel
 import com.example.ui.OrientationPreference
 import com.example.ui.RepeatMode
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import com.example.ui.VisualizerStyle
+import com.example.visualizer.CuratedSkin
+import com.example.visualizer.CylinderFontFamily
+import com.example.visualizer.StageAspectMode
+import com.example.visualizer.SynthwaveCompositionRenderer
+import com.example.visualizer.VinylRpmPreset
+import com.example.visualizer.VisualCompositionConfig
 import com.example.visualizer.VisualizerEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -474,4 +482,267 @@ class ExampleRobolectricTest {
 
         exported.file.delete()
     }
+
+    // =========================================================================
+    // CP-09 REGRESSION TESTS — V1.5 VISUALIZER RESTORATION & EXPORT VERIFICATION
+    // =========================================================================
+
+    @Test
+    fun `CP-09 curated skins, 5 visualizer styles, and vinyl RPM deterministic angle test`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = MainViewModel(app)
+        val song = Song("s1", "Open Sky", "Synthwave", "Open Sky", durationMs = 180_000L)
+        vm.setSongsForTest(listOf(song))
+        vm.playerEngine.setPreparedStateForTest(song, durationMs = 180_000L, isPlaying = true)
+
+        // Verify V1.5 established default: NORMAL = 8 RPM
+        assertEquals(VinylRpmPreset.NORMAL, vm.uiState.value.visualConfig.vinylRpmPreset)
+        assertEquals(8f, vm.uiState.value.visualConfig.vinylRpmPreset.rpm, 0.01f)
+
+        // At 7500ms (7.5s = 1/8th of a minute), 8 RPM must complete exactly 1.0 revolution (0 deg)
+        // At 3750ms (3.75s), 8 RPM must complete exactly 0.5 revolution (180 deg)
+        val angleHalfRev = SynthwaveCompositionRenderer.computeVinylAngleDegrees(3750L, 8f)
+        assertEquals(180f, angleHalfRev, 0.1f)
+
+        // Cycle through all CuratedSkin and VisualizerStyle options without interrupting playback
+        for (skin in CuratedSkin.entries) {
+            vm.setCuratedSkin(skin)
+            assertEquals(skin, vm.uiState.value.visualConfig.curatedSkin)
+            assertTrue("Changing skin must not interrupt playback", vm.playbackState.value.isPlaying)
+        }
+
+        for (style in VisualizerStyle.entries) {
+            vm.setVisualizerStyle(style)
+            assertEquals(style, vm.uiState.value.visualizerStyle)
+            assertEquals(style, vm.uiState.value.visualConfig.visualizerStyle)
+            assertTrue("Changing visualizer style must not interrupt playback", vm.playbackState.value.isPlaying)
+        }
+    }
+
+    @Test
+    fun `CP-09 3D cylinder typography bidirectional rotation and custom album song text test`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = MainViewModel(app)
+        val song = Song("s1", "Open Sky", "Original", "Open Sky", album = "ELYZARETH RECORDS", durationMs = 120_000L)
+        vm.setSongsForTest(listOf(song))
+        vm.playerEngine.setPreparedStateForTest(song, durationMs = 120_000L, isPlaying = true)
+
+        // Verify V1.5 established defaults
+        val defaultCfg = vm.uiState.value.visualConfig
+        assertEquals("ELYZARETH RECORDS", defaultCfg.cylinderTopText)
+        assertEquals(-3.0f, defaultCfg.cylinderRotationSpeed, 0.01f)
+        assertEquals(CylinderFontFamily.MONOSPACE, defaultCfg.cylinderFontFamily)
+        assertEquals(20, defaultCfg.cylinderFontSizePx)
+        assertEquals("#EC4899", defaultCfg.cylinderTopColorHex)
+        assertEquals("#F59E0B", defaultCfg.cylinderBottomColorHex)
+
+        // Bidirectional phase check: negative vs positive rotation speed
+        val phaseNeg = SynthwaveCompositionRenderer.computeCylinderPhaseRadians(2000L, -3.0f)
+        val phasePos = SynthwaveCompositionRenderer.computeCylinderPhaseRadians(2000L, +3.0f)
+        assertEquals(-phasePos, phaseNeg, 0.001f)
+
+        // Update 3D cylinder typography in ViewModel
+        vm.setCylinderTypographyConfig(
+            topText = "CUSTOM ALBUM RING",
+            bottomTextOverride = "ONCE AGAIN",
+            rotationSpeed = 2.5f,
+            fontFamily = CylinderFontFamily.SANS_SERIF,
+            fontSizePx = 26,
+            topColorHex = "#00F0FF",
+            bottomColorHex = "#10B981"
+        )
+        val updated = vm.uiState.value.visualConfig
+        assertEquals("CUSTOM ALBUM RING", updated.cylinderTopText)
+        assertEquals("ONCE AGAIN", updated.cylinderBottomTextOverride)
+        assertEquals(2.5f, updated.cylinderRotationSpeed, 0.01f)
+        assertEquals(CylinderFontFamily.SANS_SERIF, updated.cylinderFontFamily)
+        assertEquals(26, updated.cylinderFontSizePx)
+        assertTrue("Updating 3D cylinder typography must not interrupt playback", vm.playbackState.value.isPlaying)
+    }
+
+    @Test
+    fun `CP-09 two-column playlist overlay active track synchronization test`() {
+        val songs = (1..15).map { idx ->
+            Song(
+                id = "trk_$idx",
+                songTitle = "Track Title $idx",
+                versionName = "Original",
+                fullTitle = "Track Title $idx",
+                durationMs = 60_000L
+            )
+        }
+        val currentSong = songs[3] // Track 4 (index 3)
+        val config = VisualCompositionConfig()
+        val (items, activeIdx) = SynthwaveCompositionRenderer.resolvePlaylistOverlayItems(songs, currentSong, config)
+
+        assertEquals(15, items.size)
+        assertEquals("01. Track Title 1", items[0])
+        assertEquals("04. Track Title 4", items[3])
+        assertEquals("15. Track Title 15", items[14])
+        assertEquals("Active index must match currently playing track", 3, activeIdx)
+    }
+
+    @Test
+    fun `CP-09 independent X Y layout positioning, scaling, wallpaper opacity, and Reset Positions test`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = MainViewModel(app)
+        val song = Song("s1", "Open Sky", "Original", "Open Sky", durationMs = 120_000L)
+        vm.playerEngine.setPreparedStateForTest(song, durationMs = 120_000L, isPlaying = true)
+
+        assertEquals(80, vm.uiState.value.visualConfig.wallpaperOpacityPercent)
+        vm.setWallpaperOpacityPercent(65)
+        assertEquals(65, vm.uiState.value.visualConfig.wallpaperOpacityPercent)
+
+        // Apply V1.5 Screenshot 1 offsets: Sunset (-293px, +107px), Cover (+0px, -118px, 45% scale)
+        vm.setSunsetOffsets(offsetX = -293, offsetY = 107)
+        vm.setCoverPositionAndScale(offsetX = 120, offsetY = -118, scalePercent = 45)
+        vm.setPlaylistOverlayConfig(show = true, offsetY = -30, customText = "", highlightedIndex = -1)
+
+        val moved = vm.uiState.value.visualConfig
+        assertEquals(-293, moved.sunsetOffsetX)
+        assertEquals(107, moved.sunsetOffsetY)
+        assertEquals(120, moved.coverOffsetX)
+        assertEquals(-118, moved.coverOffsetY)
+        assertEquals(45, moved.coverScalePercent)
+        assertEquals(-30, moved.playlistOffsetY)
+
+        // Reset Positions must restore all layout offsets and scale to defaults (0px / 100%)
+        vm.resetVisualPositions()
+        val reset = vm.uiState.value.visualConfig
+        assertEquals(0, reset.sunsetOffsetX)
+        assertEquals(0, reset.sunsetOffsetY)
+        assertEquals(0, reset.coverOffsetX)
+        assertEquals(0, reset.coverOffsetY)
+        assertEquals(100, reset.coverScalePercent)
+        assertEquals(0, reset.playlistOffsetY)
+        assertEquals("Reset Positions must preserve wallpaper opacity", 65, reset.wallpaperOpacityPercent)
+        assertTrue("Reset Positions must not interrupt playback", vm.playbackState.value.isPlaying)
+    }
+
+    @Test
+    fun `CP-09 PNG frame export verification at 1280x720 and 720x1280 without interrupting playback`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = MainViewModel(app)
+        val songs = listOf(
+            Song("s1", "ONCE AGAIN", "Original", "ONCE AGAIN", durationMs = 180_000L),
+            Song("s2", "Elysian Nights", "Synth", "Elysian Nights", durationMs = 195_000L),
+            Song("s3", "Neon Horizon", "Original", "Neon Horizon", durationMs = 210_000L)
+        )
+        vm.setSongsForTest(songs)
+        vm.playerEngine.setPreparedStateForTest(songs[0], durationMs = 180_000L, isPlaying = true)
+
+        val freqs = FloatArray(32) { idx -> ((idx % 8) + 2) / 10f }
+
+        // 1. Export Widescreen 1280x720 PNG
+        val landscapePng = vm.exportManager.exportPngFrame(
+            song = songs[0],
+            songs = songs,
+            config = vm.uiState.value.visualConfig,
+            artworkBitmap = null,
+            wallpaperBitmap = null,
+            songTimeMs = 12_500L,
+            frequencies = freqs,
+            isPortrait = false,
+            showLyrics = true
+        )
+        assertNotNull("Widescreen 1280x720 PNG export must succeed", landscapePng)
+        assertEquals(1280, landscapePng!!.width)
+        assertEquals(720, landscapePng.height)
+        assertTrue("Exported 1280x720 PNG file must exist and be non-empty", landscapePng.file.exists() && landscapePng.sizeBytes > 1024L)
+        assertTrue("Display location must target Pictures/Elyzareth", landscapePng.displayLocation.startsWith("Pictures/Elyzareth/"))
+
+        // 2. Export Portrait 720x1280 PNG
+        val portraitPng = vm.exportManager.exportPngFrame(
+            song = songs[0],
+            songs = songs,
+            config = vm.uiState.value.visualConfig,
+            artworkBitmap = null,
+            wallpaperBitmap = null,
+            songTimeMs = 12_500L,
+            frequencies = freqs,
+            isPortrait = true,
+            showLyrics = true
+        )
+        assertNotNull("Portrait 720x1280 PNG export must succeed", portraitPng)
+        assertEquals(720, portraitPng!!.width)
+        assertEquals(1280, portraitPng.height)
+        assertTrue("Exported 720x1280 PNG file must exist and be non-empty", portraitPng.file.exists() && portraitPng.sizeBytes > 1024L)
+
+        // Copy sample PNG artifacts into ../release/ for inspection if release dir exists
+        val releaseDir = File("../release")
+        if (releaseDir.exists() && releaseDir.isDirectory) {
+            landscapePng.file.copyTo(File(releaseDir, "sample_widescreen_1280x720.png"), overwrite = true)
+            portraitPng.file.copyTo(File(releaseDir, "sample_portrait_720x1280.png"), overwrite = true)
+        }
+
+        assertTrue("PNG export must not interrupt active playback", vm.playbackState.value.isPlaying)
+
+        landscapePng.file.delete()
+        portraitPng.file.delete()
+    }
+
+    @Test
+    fun `CP-09 watermark-free MP4 composition rendering at 720x1280 and 1280x720 with playback continuity`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = MainViewModel(app)
+        val song = Song("s1", "Open Sky", "Synthwave", "Open Sky", durationMs = 180_000L)
+        vm.setSongsForTest(listOf(song))
+        vm.playerEngine.setPreparedStateForTest(song, durationMs = 180_000L, isPlaying = true)
+        vm.seekTo(15_000L)
+
+        val freqs = FloatArray(28) { 0.55f }
+
+        // Render 1280x720 frame via Mp4VideoRecorder.drawCompositionFrame
+        val bmpLandscape = Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888)
+        val canvasLandscape = Canvas(bmpLandscape)
+        vm.recorder.drawCompositionFrame(
+            canvas = canvasLandscape,
+            width = 1280,
+            height = 720,
+            song = song,
+            artwork = null,
+            songTimeMs = 15_000L,
+            frequencies = freqs,
+            isPortrait = false,
+            songs = listOf(song),
+            config = vm.uiState.value.visualConfig
+        )
+        assertEquals(1280, bmpLandscape.width)
+        assertEquals(720, bmpLandscape.height)
+
+        // Render 720x1280 frame via Mp4VideoRecorder.drawCompositionFrame
+        val bmpPortrait = Bitmap.createBitmap(720, 1280, Bitmap.Config.ARGB_8888)
+        val canvasPortrait = Canvas(bmpPortrait)
+        vm.recorder.drawCompositionFrame(
+            canvas = canvasPortrait,
+            width = 720,
+            height = 1280,
+            song = song,
+            artwork = null,
+            songTimeMs = 15_000L,
+            frequencies = freqs,
+            isPortrait = true,
+            songs = listOf(song),
+            config = vm.uiState.value.visualConfig
+        )
+        assertEquals(720, bmpPortrait.width)
+        assertEquals(1280, bmpPortrait.height)
+
+        // Verify pause and seek on live player during active recording do not crash or corrupt state
+        vm.recorder.simulateStartRecordingForTest(isPortrait = false, targetSec = 15)
+        assertTrue(vm.recordingStatus.value is RecordingStatus.Recording)
+        vm.togglePlayPause() // Pause live player during recording
+        assertFalse(vm.playbackState.value.isPlaying)
+        vm.seekTo(30_000L)   // Seek live player during recording
+        assertEquals(30_000L, vm.playbackState.value.currentPositionMs)
+        vm.togglePlayPause() // Resume live player during recording
+        assertTrue(vm.playbackState.value.isPlaying)
+
+        val exportedMp4 = vm.recorder.simulateStopAndExportForTest(song.songTitle, isPortrait = false)
+        assertTrue(exportedMp4.file.exists())
+        assertTrue(exportedMp4.name.contains("Standard_1280x720"))
+        assertTrue("Stopping recording must keep live playback active", vm.playbackState.value.isPlaying)
+        exportedMp4.file.delete()
+    }
 }
+

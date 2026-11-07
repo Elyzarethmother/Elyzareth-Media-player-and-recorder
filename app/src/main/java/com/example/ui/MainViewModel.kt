@@ -16,20 +16,30 @@ import com.example.player.AudioPlayerEngine
 import com.example.player.PlaybackMediaSessionService
 import com.example.player.PlaybackState
 import com.example.recorder.ExportManager
+import com.example.recorder.ExportedImage
 import com.example.recorder.ExportedVideo
 import com.example.recorder.Mp4VideoRecorder
 import com.example.recorder.RecordingStatus
+import com.example.visualizer.CuratedSkin
+import com.example.visualizer.CylinderFontFamily
+import com.example.visualizer.StageAspectMode
+import com.example.visualizer.VinylRpmPreset
+import com.example.visualizer.VisualCompositionConfig
 import com.example.visualizer.VisualizerEngine
 import com.example.visualizer.VisualizerFrame
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class VisualizerStyle(val displayName: String) {
-    SPECTRUM_BARS("Neon Spectrum"),
-    RADIAL_CIRCLE("Radial Pulse"),
-    MIRRORED_WAVE("Mirrored Wave")
+    NEON_SUNSET_GRID("1. Neon Sunset Grid (Default)"),
+    SPECTRUM_BARS("2. Neon Spectrum"),
+    RADIAL_CIRCLE("3. Radial Pulse"),
+    MIRRORED_WAVE("4. Mirrored Wave"),
+    RETRO_HORIZON_WAVE("5. Retro Horizon")
 }
 
 enum class RepeatMode(val displayName: String) {
@@ -49,25 +59,34 @@ data class UiState(
     val songGroups: List<SongGroup> = emptyList(),
     val currentSongGroup: SongGroup? = null,
     val isScanning: Boolean = false,
-    val visualizerStyle: VisualizerStyle = VisualizerStyle.SPECTRUM_BARS,
+    val visualizerStyle: VisualizerStyle = VisualizerStyle.NEON_SUNSET_GRID,
+    val visualConfig: VisualCompositionConfig = VisualCompositionConfig(),
     val showSettings: Boolean = false,
+    val isFullscreenStage: Boolean = false,
     val autoAdvanceEnabled: Boolean = true,
     val repeatMode: RepeatMode = RepeatMode.REPEAT_ALL,
     val orientationPreference: OrientationPreference = OrientationPreference.AUTO,
     val showLyricsOnStage: Boolean = true,
     val lastExportedVideo: ExportedVideo? = null,
+    val lastExportedImage: ExportedImage? = null,
     val statusMessage: String? = null
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val artworkManager = ArtworkManager(application)
-    private val exportManager = ExportManager(application)
+    val artworkManager = ArtworkManager(application)
+    val exportManager = ExportManager(application)
     private val musicLibraryManager = MusicLibraryManager(application, artworkManager)
     val playerEngine = AudioPlayerEngine(application, viewModelScope)
     val visualizerEngine = VisualizerEngine(application, viewModelScope)
     val recorder = Mp4VideoRecorder(application, artworkManager, exportManager)
 
-    private val _uiState = MutableStateFlow(UiState())
+    private val _uiState = MutableStateFlow(
+        UiState(
+            visualConfig = VisualCompositionConfig(
+                wallpaperUri = artworkManager.getWallpaperUri()
+            )
+        )
+    )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     val playbackState: StateFlow<PlaybackState> = playerEngine.playbackState
@@ -284,18 +303,155 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 playerEngine.updateCurrentSongMetadata(updatedSong)
                 loadLibrary()
                 _uiState.value = _uiState.value.copy(
-                    statusMessage = "Artwork updated for ${current.songTitle}"
+                    statusMessage = "Left cover artwork updated for ${current.songTitle}"
                 )
             }
         }
     }
 
+    fun clearArtworkForCurrentSong() {
+        val current = playbackState.value.currentSong ?: return
+        artworkManager.clearArtworkForSong(current.id, current.songTitle)
+        val updatedSong = current.copy(customArtworkUri = null)
+        playerEngine.updateCurrentSongMetadata(updatedSong)
+        loadLibrary()
+        _uiState.value = _uiState.value.copy(
+            statusMessage = "Cover artwork reset for ${current.songTitle}"
+        )
+    }
+
+    fun updateWallpaper(uri: Uri) {
+        viewModelScope.launch {
+            val savedUri = artworkManager.saveWallpaper(uri)
+            if (savedUri != null) {
+                updateVisualConfig { it.copy(wallpaperUri = savedUri) }
+                _uiState.value = _uiState.value.copy(
+                    statusMessage = "Background wallpaper updated"
+                )
+            }
+        }
+    }
+
+    fun clearWallpaper() {
+        artworkManager.clearWallpaper()
+        updateVisualConfig { it.copy(wallpaperUri = null) }
+        _uiState.value = _uiState.value.copy(
+            statusMessage = "Background wallpaper cleared"
+        )
+    }
+
+    fun updateVisualConfig(transform: (VisualCompositionConfig) -> VisualCompositionConfig) {
+        val updated = transform(_uiState.value.visualConfig)
+        _uiState.value = _uiState.value.copy(
+            visualConfig = updated,
+            visualizerStyle = updated.visualizerStyle
+        )
+    }
+
     fun setVisualizerStyle(style: VisualizerStyle) {
-        _uiState.value = _uiState.value.copy(visualizerStyle = style)
+        updateVisualConfig { it.copy(visualizerStyle = style) }
+    }
+
+    fun setCuratedSkin(skin: CuratedSkin) {
+        updateVisualConfig { it.copy(curatedSkin = skin) }
+    }
+
+    fun setVinylRpmPreset(preset: VinylRpmPreset) {
+        updateVisualConfig { it.copy(vinylRpmPreset = preset) }
+    }
+
+    fun setStageAspectMode(mode: StageAspectMode) {
+        updateVisualConfig { it.copy(stageAspectMode = mode) }
+    }
+
+    fun setWallpaperOpacityPercent(percent: Int) {
+        updateVisualConfig { it.copy(wallpaperOpacityPercent = percent.coerceIn(0, 100)) }
+    }
+
+    fun setSunsetOffsets(offsetX: Int = _uiState.value.visualConfig.sunsetOffsetX, offsetY: Int = _uiState.value.visualConfig.sunsetOffsetY) {
+        updateVisualConfig {
+            it.copy(
+                sunsetOffsetX = offsetX.coerceIn(-350, 350),
+                sunsetOffsetY = offsetY.coerceIn(-250, 250)
+            )
+        }
+    }
+
+    fun setCoverPositionAndScale(
+        offsetX: Int = _uiState.value.visualConfig.coverOffsetX,
+        offsetY: Int = _uiState.value.visualConfig.coverOffsetY,
+        scalePercent: Int = _uiState.value.visualConfig.coverScalePercent
+    ) {
+        updateVisualConfig {
+            it.copy(
+                coverOffsetX = offsetX.coerceIn(0, 350),
+                coverOffsetY = offsetY.coerceIn(-250, 250),
+                coverScalePercent = scalePercent.coerceIn(35, 160)
+            )
+        }
+    }
+
+    fun setPlaylistOverlayConfig(
+        show: Boolean = _uiState.value.visualConfig.showPlaylistOverlay,
+        offsetY: Int = _uiState.value.visualConfig.playlistOffsetY,
+        customText: String = _uiState.value.visualConfig.customTracklistText,
+        highlightedIndex: Int = _uiState.value.visualConfig.highlightedTrackIndex
+    ) {
+        updateVisualConfig {
+            it.copy(
+                showPlaylistOverlay = show,
+                playlistOffsetY = offsetY.coerceIn(-150, 100),
+                customTracklistText = customText,
+                highlightedTrackIndex = highlightedIndex
+            )
+        }
+    }
+
+    fun setCylinderTypographyConfig(
+        topText: String = _uiState.value.visualConfig.cylinderTopText,
+        bottomTextOverride: String = _uiState.value.visualConfig.cylinderBottomTextOverride,
+        rotationSpeed: Float = _uiState.value.visualConfig.cylinderRotationSpeed,
+        fontFamily: CylinderFontFamily = _uiState.value.visualConfig.cylinderFontFamily,
+        fontSizePx: Int = _uiState.value.visualConfig.cylinderFontSizePx,
+        topColorHex: String = _uiState.value.visualConfig.cylinderTopColorHex,
+        bottomColorHex: String = _uiState.value.visualConfig.cylinderBottomColorHex
+    ) {
+        updateVisualConfig {
+            it.copy(
+                cylinderTopText = topText,
+                cylinderBottomTextOverride = bottomTextOverride,
+                cylinderRotationSpeed = rotationSpeed.coerceIn(-5.0f, 5.0f),
+                cylinderFontFamily = fontFamily,
+                cylinderFontSizePx = fontSizePx.coerceIn(12, 42),
+                cylinderTopColorHex = topColorHex,
+                cylinderBottomColorHex = bottomColorHex
+            )
+        }
+    }
+
+    fun setTimeFlowSpeed(speed: Float) {
+        updateVisualConfig { it.copy(timeFlowSpeed = speed.coerceIn(0.5f, 4.0f)) }
+    }
+
+    fun setAudioVolumePercent(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        playerEngine.setUserVolumePercent(clamped)
+        updateVisualConfig { it.copy(audioVolumePercent = clamped) }
+    }
+
+    fun resetVisualPositions() {
+        updateVisualConfig { it.resetPositions() }
+        _uiState.value = _uiState.value.copy(
+            statusMessage = "Layout element positions reset to default"
+        )
     }
 
     fun toggleSettings(show: Boolean) {
         _uiState.value = _uiState.value.copy(showSettings = show)
+    }
+
+    fun toggleFullscreenStage(fullscreen: Boolean = !_uiState.value.isFullscreenStage) {
+        _uiState.value = _uiState.value.copy(isFullscreenStage = fullscreen)
     }
 
     fun setAutoAdvanceEnabled(enabled: Boolean) {
@@ -318,9 +474,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(statusMessage = null)
     }
 
+    fun clearLastExportedImage() {
+        _uiState.value = _uiState.value.copy(lastExportedImage = null)
+    }
+
+    fun exportFramePng(isPortrait: Boolean = false) {
+        val state = _uiState.value
+        val currentSong = playbackState.value.currentSong
+        val currentPos = playbackState.value.currentPositionMs
+        val freqs = visualizerFrame.value.frequencies
+        val wave = visualizerFrame.value.waveform
+        viewModelScope.launch {
+            val exported = withContext(Dispatchers.IO) {
+                val artBmp = artworkManager.loadBitmap(currentSong?.customArtworkUri) ?: defaultAlbumArtBitmap
+                val wpBmp = artworkManager.loadBitmap(state.visualConfig.wallpaperUri)
+                exportManager.exportPngFrame(
+                    song = currentSong,
+                    songs = state.songs,
+                    config = state.visualConfig,
+                    artworkBitmap = artBmp,
+                    wallpaperBitmap = wpBmp,
+                    songTimeMs = currentPos,
+                    frequencies = freqs,
+                    waveform = wave,
+                    isPortrait = isPortrait,
+                    showLyrics = state.showLyricsOnStage
+                )
+            }
+            if (exported != null) {
+                _uiState.value = _uiState.value.copy(
+                    lastExportedImage = exported,
+                    statusMessage = "PNG frame saved to ${exported.displayLocation}"
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    statusMessage = "Failed to export PNG frame"
+                )
+            }
+        }
+    }
+
     fun startRecording(isPortrait: Boolean, durationSec: Int = 15) {
         val song = playbackState.value.currentSong ?: return
         val segmentStartMs = playbackState.value.currentPositionMs
+        val currentSongs = _uiState.value.songs
+        val currentConfig = _uiState.value.visualConfig
+        val showLyrics = _uiState.value.showLyricsOnStage
         viewModelScope.launch {
             recorder.recordComposition(
                 song = song,
@@ -328,6 +527,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 durationSeconds = durationSec,
                 startPositionMs = segmentStartMs,
                 defaultArtworkBitmap = defaultAlbumArtBitmap,
+                songs = currentSongs,
+                config = currentConfig,
+                showLyrics = showLyrics,
                 realtimeFrequenciesProvider = { visualizerFrame.value.frequencies }
             )
         }
@@ -351,6 +553,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playExportedVideo(video: ExportedVideo) {
         exportManager.playVideo(video)
+    }
+
+    fun shareExportedImage(image: ExportedImage) {
+        exportManager.shareImage(image)
+    }
+
+    fun viewExportedImage(image: ExportedImage) {
+        exportManager.viewImage(image)
+    }
+
+    fun loadCoverArtworkBitmap(song: Song?): Bitmap? {
+        return artworkManager.loadBitmap(song?.customArtworkUri) ?: defaultAlbumArtBitmap
+    }
+
+    fun loadWallpaperBitmap(config: VisualCompositionConfig): Bitmap? {
+        return artworkManager.loadBitmap(config.wallpaperUri)
     }
 
     internal fun setSongsForTest(songs: List<Song>) {

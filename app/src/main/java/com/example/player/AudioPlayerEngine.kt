@@ -70,9 +70,19 @@ class AudioPlayerEngine(
     private var onCompletionCallback: (() -> Unit)? = null
     private var activeLoadToken: Long = 0L
     private var isTestPreparedMode: Boolean = false
+    private var userVolumeScalar: Float = 1.0f
 
     fun setOnCompletionListener(listener: () -> Unit) {
         onCompletionCallback = listener
+    }
+
+    fun setUserVolumePercent(percent: Int) {
+        userVolumeScalar = (percent.coerceIn(0, 100)) / 100f
+        val effectiveVol = if (_playbackState.value.isDucked) userVolumeScalar * 0.25f else userVolumeScalar
+        try {
+            mediaPlayer?.setVolume(effectiveVol, effectiveVol)
+        } catch (_: Exception) {
+        }
     }
 
     fun handleAudioFocusChange(focusChange: Int) {
@@ -89,8 +99,9 @@ class AudioPlayerEngine(
                 pauseInternal(preserveResumeFlag = true)
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                val duckVol = userVolumeScalar * 0.25f
                 try {
-                    mediaPlayer?.setVolume(0.25f, 0.25f)
+                    mediaPlayer?.setVolume(duckVol, duckVol)
                 } catch (_: Exception) {
                 }
                 _playbackState.value = _playbackState.value.copy(isDucked = true)
@@ -98,7 +109,7 @@ class AudioPlayerEngine(
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasAudioFocus = true
                 try {
-                    mediaPlayer?.setVolume(1.0f, 1.0f)
+                    mediaPlayer?.setVolume(userVolumeScalar, userVolumeScalar)
                 } catch (_: Exception) {
                 }
                 _playbackState.value = _playbackState.value.copy(isDucked = false)
@@ -122,7 +133,10 @@ class AudioPlayerEngine(
                 AudioManager.AUDIOFOCUS_GAIN
             )
         }
-        hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        hasAudioFocus = (
+            result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED ||
+                result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+            )
         return hasAudioFocus
     }
 
@@ -192,26 +206,20 @@ class AudioPlayerEngine(
                     error = null
                 )
                 if (autoPlay) {
-                    if (requestAudioFocus()) {
-                        try {
-                            mp.setVolume(1.0f, 1.0f)
-                            mp.start()
-                            _playbackState.value = _playbackState.value.copy(
-                                isPlaying = true,
-                                error = null
-                            )
-                            startProgressTracker()
-                            PlaybackMediaSessionService.syncForegroundNotification(appContext, _playbackState.value)
-                        } catch (e: Exception) {
-                            _playbackState.value = _playbackState.value.copy(
-                                isPlaying = false,
-                                error = "Failed to start playback: ${e.message ?: e.javaClass.simpleName}"
-                            )
-                        }
-                    } else {
+                    requestAudioFocus()
+                    try {
+                        mp.setVolume(userVolumeScalar, userVolumeScalar)
+                        mp.start()
+                        _playbackState.value = _playbackState.value.copy(
+                            isPlaying = true,
+                            error = null
+                        )
+                        startProgressTracker()
+                        PlaybackMediaSessionService.syncForegroundNotification(appContext, _playbackState.value)
+                    } catch (e: Exception) {
                         _playbackState.value = _playbackState.value.copy(
                             isPlaying = false,
-                            error = "Audio focus denied by system; tap Play to retry."
+                            error = "Failed to start playback: ${e.message ?: e.javaClass.simpleName}"
                         )
                     }
                 } else {
@@ -237,6 +245,7 @@ class AudioPlayerEngine(
 
             player.setOnErrorListener { _, what, extra ->
                 if (currentToken != activeLoadToken) return@setOnErrorListener true
+                if (what == -38) return@setOnErrorListener true
                 stopProgressTracker()
                 _playbackState.value = _playbackState.value.copy(
                     isPlaying = false,
@@ -274,10 +283,10 @@ class AudioPlayerEngine(
         // 1. Try local readable file path first (e.g. app-private imported audio)
         if (!song.filePath.isNullOrBlank()) {
             val file = File(song.filePath)
-            if (file.exists() && file.canRead()) {
+            if (file.exists() && file.canRead() && file.length() > 0L) {
                 try {
                     FileInputStream(file).use { fis ->
-                        player.setDataSource(fis.fd)
+                        player.setDataSource(fis.fd, 0L, file.length())
                         configured = true
                     }
                 } catch (e: Exception) {
@@ -323,14 +332,8 @@ class AudioPlayerEngine(
             return
         }
 
-        if (requestAudioFocus()) {
-            startPlaybackInternal()
-        } else {
-            _playbackState.value = state.copy(
-                isPlaying = false,
-                error = "Audio focus denied by system."
-            )
-        }
+        requestAudioFocus()
+        startPlaybackInternal()
     }
 
     private fun startPlaybackInternal() {
@@ -343,7 +346,7 @@ class AudioPlayerEngine(
                 if (state.durationMs > 0L && state.currentPositionMs >= state.durationMs - 150L) {
                     player.seekTo(0)
                 }
-                player.setVolume(1.0f, 1.0f)
+                player.setVolume(userVolumeScalar, userVolumeScalar)
                 player.start()
             }
             _playbackState.value = _playbackState.value.copy(

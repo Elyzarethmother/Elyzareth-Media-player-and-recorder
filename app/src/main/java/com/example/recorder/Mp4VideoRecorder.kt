@@ -18,6 +18,8 @@ import android.net.Uri
 import com.example.data.ArtworkManager
 import com.example.data.LyricsManager
 import com.example.data.model.Song
+import com.example.visualizer.SynthwaveCompositionRenderer
+import com.example.visualizer.VisualCompositionConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -517,6 +519,9 @@ class Mp4VideoRecorder(
         durationSeconds: Int = 15,
         startPositionMs: Long = 0L,
         defaultArtworkBitmap: Bitmap? = null,
+        songs: List<Song> = emptyList(),
+        config: VisualCompositionConfig = VisualCompositionConfig(),
+        showLyrics: Boolean = true,
         realtimeFrequenciesProvider: (() -> FloatArray)? = null
     ): ExportedVideo? = withContext(Dispatchers.IO) {
         val width = if (isPortrait) 720 else 1280
@@ -545,6 +550,7 @@ class Mp4VideoRecorder(
         try {
             val customArt = artworkManager.loadBitmap(song.customArtworkUri)
             val artworkBitmap = customArt ?: defaultArtworkBitmap
+            val wallpaperBitmap = artworkManager.loadBitmap(config.wallpaperUri)
 
             // 1. Setup Audio Extractor & locate audio track
             extractor = MediaExtractor()
@@ -821,7 +827,11 @@ class Mp4VideoRecorder(
                                 artwork = artworkBitmap,
                                 songTimeMs = songPositionMs,
                                 frequencies = spectrumBars,
-                                isPortrait = isPortrait
+                                isPortrait = isPortrait,
+                                songs = songs,
+                                config = config,
+                                wallpaperBitmap = wallpaperBitmap,
+                                showLyrics = showLyrics
                             )
 
                             renderBitmap.getPixels(argbPixels, 0, width, 0, 0, width, height)
@@ -909,12 +919,14 @@ class Mp4VideoRecorder(
             // Verify that the finalized MP4 contains both valid video and audio tracks
             val verification = Mp4StreamVerifier.verifyMp4File(outputFile, width, height)
             if (verification.isValid) {
+                val mediaStoreUri = exportManager.publishVideoToMediaStore(outputFile)
                 val exported = ExportedVideo(
                     file = outputFile,
                     name = outputFile.name,
                     sizeBytes = outputFile.length(),
                     formattedDate = "Just now",
-                    uri = exportManager.getShareableUri(outputFile)
+                    uri = mediaStoreUri ?: exportManager.getShareableUri(outputFile),
+                    mediaStoreUri = mediaStoreUri
                 )
                 _status.value = RecordingStatus.Completed(exported)
                 exported
@@ -948,135 +960,24 @@ class Mp4VideoRecorder(
         artwork: Bitmap?,
         songTimeMs: Long,
         frequencies: FloatArray,
-        isPortrait: Boolean
+        isPortrait: Boolean,
+        songs: List<Song> = listOf(song),
+        config: VisualCompositionConfig = VisualCompositionConfig(),
+        wallpaperBitmap: Bitmap? = null,
+        showLyrics: Boolean = true
     ) {
-        // 1. Background Gradient
-        val bgPaint = Paint().apply {
-            shader = LinearGradient(
-                0f, 0f, 0f, height.toFloat(),
-                intArrayOf(Color.rgb(18, 14, 28), Color.rgb(10, 8, 18), Color.rgb(5, 4, 10)),
-                floatArrayOf(0f, 0.6f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-
-        // 2. Artwork Rendering (FIT Mode as required by Section 3.4)
-        if (artwork != null && !artwork.isRecycled) {
-            val artFrameRect = if (isPortrait) {
-                RectF(width * 0.1f, height * 0.12f, width * 0.9f, height * 0.52f)
-            } else {
-                RectF(width * 0.08f, height * 0.15f, width * 0.45f, height * 0.85f)
-            }
-
-            val glowPaint = Paint().apply {
-                color = Color.argb(60, 180, 120, 255)
-            }
-            val glowRect = RectF(artFrameRect)
-            glowRect.inset(-12f, -12f)
-            canvas.drawRoundRect(glowRect, 28f, 28f, glowPaint)
-
-            val imgW = artwork.width.toFloat()
-            val imgH = artwork.height.toFloat()
-            val scale = min(artFrameRect.width() / imgW, artFrameRect.height() / imgH)
-            val destW = imgW * scale
-            val destH = imgH * scale
-            val destX = artFrameRect.centerX() - destW / 2f
-            val destY = artFrameRect.centerY() - destH / 2f
-            val targetRect = RectF(destX, destY, destX + destW, destY + destH)
-
-            val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            canvas.drawBitmap(artwork, null, targetRect, artPaint)
-        }
-
-        // 3. Song Title & Version Badge
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = if (isPortrait) 36f else 38f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(190, 160, 255)
-            textSize = 24f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-        }
-
-        val textStartX = if (isPortrait) width * 0.1f else width * 0.50f
-        var textY = if (isPortrait) height * 0.58f else height * 0.24f
-
-        canvas.drawText(song.songTitle, textStartX, textY, titlePaint)
-        textY += 34f
-        canvas.drawText("${song.artist} • Version: ${song.versionName}", textStartX, textY, subPaint)
-
-        // 4. Lyrics Display (Section 3.5: Synchronized progression when timing available)
-        val lyrics = song.syncedLyrics
-        if (lyrics.isNotEmpty()) {
-            val activeIdx = LyricsManager.getActiveLyricIndex(lyrics, songTimeMs)
-            var lyricY = if (isPortrait) height * 0.67f else height * 0.40f
-
-            val lyricPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-            val startLine = (activeIdx - 1).coerceAtLeast(0)
-            val endLine = (activeIdx + 2).coerceAtMost(lyrics.size - 1)
-
-            for (i in startLine..endLine) {
-                val line = lyrics[i]
-                if (i == activeIdx) {
-                    lyricPaint.color = Color.rgb(255, 230, 100)
-                    lyricPaint.textSize = 28f
-                    lyricPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                } else {
-                    lyricPaint.color = Color.argb(140, 220, 220, 255)
-                    lyricPaint.textSize = 22f
-                    lyricPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-                }
-                canvas.drawText(line.text, textStartX, lyricY, lyricPaint)
-                lyricY += 38f
-            }
-        } else if (!song.lyricsText.isNullOrBlank()) {
-            val lyricPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.rgb(220, 210, 245)
-                textSize = 22f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            }
-            var lyricY = if (isPortrait) height * 0.67f else height * 0.40f
-            song.lyricsText.lines().take(3).forEach { line ->
-                canvas.drawText(line, textStartX, lyricY, lyricPaint)
-                lyricY += 34f
-            }
-        }
-
-        // 5. Real Audio-Reactive Visualizer (driven by actual decoded PCM FFT data)
-        val vizBottom = if (isPortrait) height * 0.88f else height * 0.85f
-        val vizLeft = if (isPortrait) width * 0.08f else width * 0.50f
-        val vizWidth = if (isPortrait) width * 0.84f else width * 0.42f
-        val barCount = frequencies.size.coerceAtLeast(1)
-        val barSpacing = vizWidth / barCount
-        val barWidth = barSpacing * 0.68f
-        val maxBarHeight = if (isPortrait) 160f else 120f
-
-        val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        for (i in 0 until barCount) {
-            val mag = frequencies[i].coerceIn(0f, 1f)
-            val barHeight = (mag * maxBarHeight) + 8f
-            val bx = vizLeft + i * barSpacing
-            val by = vizBottom - barHeight
-
-            barPaint.shader = LinearGradient(
-                bx, by, bx, vizBottom,
-                intArrayOf(Color.rgb(255, 120, 220), Color.rgb(130, 90, 255), Color.rgb(0, 220, 255)),
-                null,
-                Shader.TileMode.CLAMP
-            )
-            canvas.drawRoundRect(bx, by, bx + barWidth, vizBottom, 6f, 6f, barPaint)
-        }
-
-        // 6. Studio Branding
-        val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(100, 180, 180, 220)
-            textSize = 18f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-        }
-        val brandY = height - 24f
-        canvas.drawText("Elyzareth Player pro v1.0 • Elyzareth Studio", width * 0.08f, brandY, brandPaint)
+        SynthwaveCompositionRenderer.renderFrame(
+            canvas = canvas,
+            width = width,
+            height = height,
+            song = song,
+            songs = if (songs.isEmpty()) listOf(song) else songs,
+            config = config,
+            artworkBitmap = artwork,
+            wallpaperBitmap = wallpaperBitmap,
+            songTimeMs = songTimeMs,
+            frequencies = frequencies,
+            showLyrics = showLyrics
+        )
     }
 }
